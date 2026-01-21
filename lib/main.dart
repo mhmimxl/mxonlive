@@ -14,18 +14,15 @@ import 'package:url_launcher/url_launcher.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 
 // --- CONFIGURATION ---
-const String primaryConfigUrl = "https://raw.githubusercontent.com/mxonlive/mxonlive.github.io/refs/heads/main/live/mxonlive_app_1.json";
-const String backupConfigUrl = "https://mxonlive.short.gy/mxonlive_app_json"; 
-
+const String configJsonUrl = "https://raw.githubusercontent.com/mhmimxl/mxliveoo/refs/heads/main/config.json";
 const String telegramUrl = "https://t.me/mxonlive";
 const String contactEmail = "mailto:sultanarabi161@gmail.com";
 const String appName = "mxonlive";
 
-const Map<String, String> secureHeaders = {
-  "User-Agent": "mxonlive-agent/2.0.0 (Android; Secure)",
-};
+// Default Fallback User Agent (If not specified in M3U)
+const String defaultUserAgent = "mxonlive-agent/3.0.0 (Android; Secure)";
 
-// --- SMART CACHE MANAGER (Limit: ~200MB) ---
+// --- CACHE MANAGER ---
 final customCacheManager = fcm.CacheManager(
   fcm.Config(
     'mxonlive_cache_v3', 
@@ -54,7 +51,15 @@ class Channel {
   final String logo;
   final String url;
   final String group;
-  Channel({required this.name, required this.logo, required this.url, required this.group});
+  final Map<String, String> headers; // 🔥 New: Per-Channel Headers
+
+  Channel({
+    required this.name, 
+    required this.logo, 
+    required this.url, 
+    required this.group,
+    this.headers = const {},
+  });
 }
 
 class AppConfig {
@@ -64,7 +69,7 @@ class AppConfig {
   List<ServerItem> servers;
 
   AppConfig({
-    this.notice = "Welcome to mxonlive",
+    this.notice = "Welcome to mxonlive v3.0.0",
     this.aboutNotice = "No details available.",
     this.updateData,
     this.servers = const [],
@@ -96,32 +101,6 @@ class MxOnLiveApp extends StatelessWidget {
         ),
       ),
       home: const SplashScreen(),
-    );
-  }
-}
-
-// --- REUSABLE LOGO WIDGET ---
-class ChannelLogo extends StatelessWidget {
-  final String url;
-  const ChannelLogo({super.key, required this.url});
-
-  @override
-  Widget build(BuildContext context) {
-    if (url.isEmpty) {
-      return Padding(
-        padding: const EdgeInsets.all(12.0),
-        child: Image.asset('assets/logo.png', color: Colors.white.withOpacity(0.5)),
-      );
-    }
-    return CachedNetworkImage(
-      imageUrl: url,
-      cacheManager: customCacheManager,
-      fit: BoxFit.contain,
-      placeholder: (context, url) => const Center(child: SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.redAccent))),
-      errorWidget: (context, url, error) => Padding(
-        padding: const EdgeInsets.all(12.0),
-        child: Image.asset('assets/logo.png', color: Colors.white.withOpacity(0.5)),
-      ),
     );
   }
 }
@@ -162,7 +141,7 @@ class _SplashScreenState extends State<SplashScreen> {
             const SizedBox(height: 30),
             const CircularProgressIndicator(color: Colors.redAccent),
             const SizedBox(height: 10),
-            const Text("Welcome", style: TextStyle(color: Colors.grey, fontSize: 12)),
+            const Text("v3.0.0", style: TextStyle(color: Colors.grey, fontSize: 12)),
           ],
         ),
       ),
@@ -180,10 +159,13 @@ class HomePage extends StatefulWidget {
 class _HomePageState extends State<HomePage> {
   AppConfig appConfig = AppConfig();
   ServerItem? selectedServer;
+  
   List<Channel> allChannels = [];
   Map<String, List<Channel>> groupedChannels = {};
+  
   bool isConfigLoading = true;
   bool isPlaylistLoading = false;
+  
   TextEditingController searchController = TextEditingController();
 
   @override
@@ -208,25 +190,16 @@ class _HomePageState extends State<HomePage> {
   Future<void> fetchConfig() async {
     setState(() { isConfigLoading = true; });
     try {
-      await _fetchFromUrl(primaryConfigUrl);
-    } catch (e) {
-      print("Primary Failed. Backup...");
-      try {
-        await _fetchFromUrl(backupConfigUrl);
-      } catch (e2) {
-        setState(() { isConfigLoading = false; });
-        _showError("Connection Failed. All Servers Down.");
+      final res = await http.get(Uri.parse(configJsonUrl)).timeout(const Duration(seconds: 10));
+      if (res.statusCode == 200) {
+        final data = jsonDecode(res.body);
+        _parseConfig(data);
+      } else {
+        throw Exception("Status ${res.statusCode}");
       }
-    }
-  }
-
-  Future<void> _fetchFromUrl(String url) async {
-    final res = await http.get(Uri.parse(url), headers: secureHeaders).timeout(const Duration(seconds: 10));
-    if (res.statusCode == 200) {
-      final data = jsonDecode(res.body);
-      _parseConfig(data);
-    } else {
-      throw Exception("Status ${res.statusCode}");
+    } catch (e) {
+      setState(() { isConfigLoading = false; });
+      _showError("Connection Failed. Check Internet.");
     }
   }
 
@@ -252,7 +225,7 @@ class _HomePageState extends State<HomePage> {
         loadPlaylist(loadedServers[0].url);
       } else {
         isConfigLoading = false;
-        _showError("Maintenance Mode.");
+        _showError("No servers available.");
       }
     });
   }
@@ -260,7 +233,12 @@ class _HomePageState extends State<HomePage> {
   Future<void> loadPlaylist(String url) async {
     setState(() { isPlaylistLoading = true; searchController.clear(); });
     try {
-      final response = await http.get(Uri.parse(url), headers: secureHeaders).timeout(const Duration(seconds: 15));
+      // Use default UA for fetching the playlist itself
+      final response = await http.get(
+        Uri.parse(url), 
+        headers: {"User-Agent": defaultUserAgent}
+      ).timeout(const Duration(seconds: 15));
+      
       if (response.statusCode == 200) {
         parseM3u(response.body);
       } else {
@@ -272,25 +250,87 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
+  // 🔥🔥🔥 SMART PARSER ENGINE v3.0 🔥🔥🔥
   void parseM3u(String content) {
     List<String> lines = const LineSplitter().convert(content);
     List<Channel> channels = [];
+    
+    // Temp variables for the current channel
     String? name;
     String? logo;
     String? group;
+    Map<String, String> currentHeaders = {}; // Headers for the specific channel
 
     for (String line in lines) {
+      line = line.trim();
+      if (line.isEmpty) continue;
+
       if (line.startsWith("#EXTINF:")) {
+        // 1. Parse Info
         final nameMatch = RegExp(r',(.*)').firstMatch(line);
         name = nameMatch?.group(1)?.trim() ?? "Unknown";
+        
         final logoMatch = RegExp(r'tvg-logo="([^"]*)"').firstMatch(line);
         logo = logoMatch?.group(1) ?? "";
+        
         final groupMatch = RegExp(r'group-title="([^"]*)"').firstMatch(line);
         group = groupMatch?.group(1) ?? "Others";
-      } else if (line.isNotEmpty && !line.startsWith("#")) {
+
+        // Also check if tvg-name exists and use it if name is generic
+        if(name == "Unknown") {
+           final tvgNameMatch = RegExp(r'tvg-name="([^"]*)"').firstMatch(line);
+           if(tvgNameMatch != null) name = tvgNameMatch.group(1);
+        }
+
+      } else if (line.startsWith("#EXTVLCOPT:") || line.startsWith("#EXTHTTP:")) {
+        // 2. Parse Headers (Cookies, User-Agent, Referrer)
+        
+        // Handle User-Agent
+        if (line.toLowerCase().contains("http-user-agent=")) {
+          currentHeaders['User-Agent'] = line.split('=')[1].trim();
+        }
+        // Handle Referrer (Fix spelling variations)
+        else if (line.toLowerCase().contains("http-referrer=") || line.toLowerCase().contains("http-referer=")) {
+          currentHeaders['Referer'] = line.split('=')[1].trim();
+        }
+        // Handle Origin
+        else if (line.toLowerCase().contains("http-origin=")) {
+          currentHeaders['Origin'] = line.split('=')[1].trim();
+        }
+        // Handle JSON Cookies (Toffee style)
+        else if (line.contains("{")) {
+          try {
+            int startIndex = line.indexOf("{");
+            String jsonStr = line.substring(startIndex);
+            Map<String, dynamic> jsonMap = jsonDecode(jsonStr);
+            if (jsonMap.containsKey('cookie')) {
+              currentHeaders['Cookie'] = jsonMap['cookie'];
+            }
+            if (jsonMap.containsKey('User-Agent')) { // Sometimes inside JSON
+               currentHeaders['User-Agent'] = jsonMap['User-Agent'];
+            }
+          } catch (_) {}
+        }
+
+      } else if (!line.startsWith("#")) {
+        // 3. This is the URL
         if (name != null) {
-          channels.add(Channel(name: name, logo: logo ?? "", url: line.trim(), group: group ?? "Others"));
+          // If no specific User-Agent found, use Default
+          if (!currentHeaders.containsKey('User-Agent')) {
+            currentHeaders['User-Agent'] = defaultUserAgent;
+          }
+
+          channels.add(Channel(
+            name: name, 
+            logo: logo ?? "", 
+            url: line, 
+            group: group ?? "Others",
+            headers: Map.from(currentHeaders) // Copy headers
+          ));
+          
+          // Reset for next channel
           name = null;
+          currentHeaders = {}; 
         }
       }
     }
@@ -522,7 +562,7 @@ class _HomePageState extends State<HomePage> {
                             borderRadius: BorderRadius.circular(12),
                             border: Border.all(color: Colors.white.withOpacity(0.05)),
                           ),
-                          child: ChannelLogo(url: channel.logo),
+                          child: _buildLogo(channel.logo),
                         ),
                       ),
                       const SizedBox(height: 5),
@@ -541,6 +581,25 @@ class _HomePageState extends State<HomePage> {
           ],
         );
       },
+    );
+  }
+
+  Widget _buildLogo(String url) {
+    if (url.isEmpty) {
+      return Padding(
+        padding: const EdgeInsets.all(12.0),
+        child: Image.asset('assets/logo.png', color: Colors.white.withOpacity(0.5)),
+      );
+    }
+    return CachedNetworkImage(
+      imageUrl: url,
+      cacheManager: customCacheManager,
+      fit: BoxFit.contain,
+      placeholder: (context, url) => const Center(child: SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.redAccent))),
+      errorWidget: (context, url, error) => Padding(
+        padding: const EdgeInsets.all(12.0),
+        child: Image.asset('assets/logo.png', color: Colors.white.withOpacity(0.5)),
+      ),
     );
   }
 }
@@ -572,9 +631,10 @@ class _PlayerScreenState extends State<PlayerScreen> {
 
   Future<void> initializePlayer() async {
     try {
+      // 🔥 USE DYNAMIC HEADERS FROM CHANNEL OBJECT 🔥
       _videoPlayerController = VideoPlayerController.networkUrl(
         Uri.parse(widget.channel.url),
-        httpHeaders: secureHeaders,
+        httpHeaders: widget.channel.headers, // This now contains Cookies, Referrer, etc.
       );
       await _videoPlayerController.initialize();
       
@@ -598,14 +658,14 @@ class _PlayerScreenState extends State<PlayerScreen> {
             children: [
               Icon(Icons.error_outline, color: Colors.red, size: 40),
               SizedBox(height: 10),
-              Text("Stream Offline / Error", style: TextStyle(color: Colors.white)),
+              Text("Stream Offline / Blocked", style: TextStyle(color: Colors.white)),
             ],
           ),
         ),
       );
       setState(() {});
     } catch (e) {
-       // Log
+       // Log error
     }
   }
 
@@ -670,7 +730,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
                               color: const Color(0xFF1E1E1E),
                               borderRadius: BorderRadius.circular(6),
                             ),
-                            child: ChannelLogo(url: ch.logo),
+                            child: _buildLogo(ch.logo),
                           ),
                           title: Text(ch.name, style: const TextStyle(color: Colors.white)),
                           subtitle: Text(ch.group, style: const TextStyle(color: Colors.grey, fontSize: 10)),
@@ -687,6 +747,25 @@ class _PlayerScreenState extends State<PlayerScreen> {
             ),
           ],
         ),
+      ),
+    );
+  }
+
+  Widget _buildLogo(String url) {
+    if (url.isEmpty) {
+      return Padding(
+        padding: const EdgeInsets.all(12.0),
+        child: Image.asset('assets/logo.png', color: Colors.white.withOpacity(0.5)),
+      );
+    }
+    return CachedNetworkImage(
+      imageUrl: url,
+      cacheManager: customCacheManager,
+      fit: BoxFit.contain,
+      placeholder: (context, url) => const Center(child: SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.redAccent))),
+      errorWidget: (context, url, error) => Padding(
+        padding: const EdgeInsets.all(12.0),
+        child: Image.asset('assets/logo.png', color: Colors.white.withOpacity(0.5)),
       ),
     );
   }
@@ -770,14 +849,12 @@ class InfoPage extends StatelessWidget {
                 ],
               ),
             ),
-            
             const SizedBox(height: 20),
-
             ListTile(
               contentPadding: EdgeInsets.zero,
               leading: const CircleAvatar(backgroundColor: Colors.redAccent, child: Icon(Icons.person, color: Colors.white)),
               title: const Text("Developed by Sultan Arabi"),
-              subtitle: const Text("- Developer"),
+              subtitle: const Text("Lettel Developer"),
               trailing: IconButton(
                 icon: const Icon(Icons.email, color: Colors.white),
                 onPressed: () => launchUrl(Uri.parse(contactEmail)),
